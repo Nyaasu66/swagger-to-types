@@ -8,8 +8,8 @@ interface DereferenceItem extends Required<OpenAPIV3.OperationObject> {}
 type SchemaType<T> = T extends 'array'
   ? OpenAPIV3.ArraySchemaObject
   : T extends 'object'
-  ? OpenAPIV3.NonArraySchemaObject
-  : OpenAPIV3.SchemaObject
+    ? OpenAPIV3.NonArraySchemaObject
+    : OpenAPIV3.SchemaObject
 
 type SchemaItem<T extends 'array' | 'object' | void = void> = Omit<SchemaType<T>, 'required'> & {
   /** 字段名 */
@@ -118,9 +118,9 @@ export class OpenAPIV3Parser extends BaseParser {
       }
 
       if (schema.type === 'array') {
-        paramCatchObj[propertiesItem.name] = this.parseArray(propertiesItem as SchemaItem<'array'>)
+        paramCatchObj[propertiesItem.name] = this.parseArray(propertiesItem as SchemaItem<'array'>, 0)
       } else {
-        paramCatchObj[propertiesItem.name] = this.parseObject(propertiesItem as SchemaItem<'object'>)
+        paramCatchObj[propertiesItem.name] = this.parseObject(propertiesItem as SchemaItem<'object'>, undefined, 0)
       }
     })
 
@@ -150,7 +150,7 @@ export class OpenAPIV3Parser extends BaseParser {
       return void 0
     }
 
-    return this.parseSchemaObject(requestBodySchema, '')
+    return this.parseSchemaObject(requestBodySchema, '', undefined, 0)
   }
 
   getResponseData(responses: OpenAPIV3.ResponsesObject, key?: string): OpenAPIV3.MediaTypeObject | void {
@@ -200,10 +200,26 @@ export class OpenAPIV3Parser extends BaseParser {
       return undefined
     }
 
-    return this.parseSchemaObject(responseBodySchema, '')
+    return this.parseSchemaObject(responseBodySchema, '', undefined, 0)
   }
 
-  parseSchemaObject(schema: OpenAPIV3.SchemaObject, name: string, itemsRequiredNamesList?: string[]) {
+  parseSchemaObject(
+    schema: OpenAPIV3.SchemaObject,
+    name: string,
+    itemsRequiredNamesList?: string[],
+    depth: number = 0
+  ) {
+    // 添加深度限制，防止无限递归
+    if (depth > 10) {
+      log.warn(`parseSchemaObject: Maximum depth exceeded for schema: ${name}`)
+      return {
+        name,
+        type: schema.type || 'any',
+        description: schema.description,
+        required: itemsRequiredNamesList?.includes(name) || false,
+      } as TreeInterfacePropertiesItem
+    }
+
     let requiredBoolean = false
     if (itemsRequiredNamesList) {
       requiredBoolean = itemsRequiredNamesList.includes(name)
@@ -211,15 +227,31 @@ export class OpenAPIV3Parser extends BaseParser {
 
     if (schema.type === 'array') {
       const { required, ...val } = schema
-      return this.parseArray({ ...val, name, required: requiredBoolean, itemsRequiredNamesList: required })
+      return this.parseArray({ ...val, name, required: requiredBoolean, itemsRequiredNamesList: required }, depth + 1)
     } else {
       const { required, ...val } = schema
-      return this.parseObject({ ...val, name, required: requiredBoolean, itemsRequiredNamesList: required })
+      return this.parseObject(
+        { ...val, name, required: requiredBoolean, itemsRequiredNamesList: required },
+        undefined,
+        depth + 1
+      )
     }
   }
 
   /** 解析数组 */
-  parseArray(arrayItem: SchemaItem<'array'>): TreeInterfacePropertiesItem {
+  parseArray(arrayItem: SchemaItem<'array'>, depth: number = 0): TreeInterfacePropertiesItem {
+    // 添加深度限制，防止无限递归
+    if (depth > 10) {
+      log.warn(`parseArray: Maximum depth exceeded for array item: ${arrayItem.name}`)
+      return {
+        name: arrayItem.name,
+        type: arrayItem.type || 'array',
+        description: arrayItem.description,
+        required: arrayItem.required,
+        itemsType: arrayItem.itemsType,
+      } as TreeInterfacePropertiesItem
+    }
+
     const { type, description } = arrayItem
     const items = this.dereferenceSchema(arrayItem.items) || {}
 
@@ -239,41 +271,66 @@ export class OpenAPIV3Parser extends BaseParser {
     }
 
     if (!type) {
-      return itemSchema
+      return itemSchema as TreeInterfacePropertiesItem
     }
 
     if (itemsType === 'array') {
-      return this.parseArray(itemSchema as SchemaItem<'array'>)
+      return this.parseArray(itemSchema as SchemaItem<'array'>, depth + 1)
     } else {
       if (items.required) {
         itemSchema.itemsRequiredNamesList = items.required
       }
-      return this.parseObject(itemSchema as SchemaItem<'object'>)
+      return this.parseObject(itemSchema as SchemaItem<'object'>, undefined, depth + 1)
     }
   }
 
   /** 解析对象 */
-  parseObject(propertiesItem: SchemaItem<'object'>, parentRef?: string): TreeInterfacePropertiesItem {
+  parseObject(
+    propertiesItem: SchemaItem<'object'>,
+    parentRef?: string,
+    depth: number = 0
+  ): TreeInterfacePropertiesItem {
+    // 添加深度限制，防止无限递归
+    if (depth > 10) {
+      log.warn(`parseObject: Maximum depth exceeded for object item: ${propertiesItem.name}`)
+      return {
+        name: propertiesItem.name,
+        type: propertiesItem.type || 'object',
+        description: propertiesItem.description,
+        required: propertiesItem.required,
+      } as TreeInterfacePropertiesItem
+    }
+
     const { properties, allOf, itemsRequiredNamesList } = propertiesItem
     const res: TreeInterfacePropertiesItem = {
       ...propertiesItem,
     }
 
     if (res.properties) {
-      res.item = this.parseProperties(properties, itemsRequiredNamesList)
+      res.item = this.parseProperties(properties, itemsRequiredNamesList, depth + 1)
       return res
     }
 
     if (allOf && allOf.length === 1) {
       const allOfSingleSchema = this.dereferenceSchema(allOf[0])
       if (!allOfSingleSchema) return res
-      res.item = this.parseProperties(allOfSingleSchema.properties, itemsRequiredNamesList)
+      res.item = this.parseProperties(allOfSingleSchema.properties, itemsRequiredNamesList, depth + 1)
     }
 
     return res
   }
 
-  parseProperties(properties: OpenAPIV3.BaseSchemaObject['properties'], itemsRequiredNamesList?: string[]) {
+  parseProperties(
+    properties: OpenAPIV3.BaseSchemaObject['properties'],
+    itemsRequiredNamesList?: string[],
+    depth: number = 0
+  ) {
+    // 添加深度限制，防止无限递归
+    if (depth > 10) {
+      log.warn(`parseProperties: Maximum depth exceeded`)
+      return []
+    }
+
     const arr: TreeInterfacePropertiesItem[] = []
     for (const name in properties) {
       const schemaSource = properties[name] as OpenAPIV3.ReferenceObject
@@ -288,7 +345,7 @@ export class OpenAPIV3Parser extends BaseParser {
         continue
       }
 
-      arr.push(this.parseSchemaObject(propertiesSchema, name, itemsRequiredNamesList))
+      arr.push(this.parseSchemaObject(propertiesSchema, name, itemsRequiredNamesList, depth + 1))
     }
     return arr
   }
